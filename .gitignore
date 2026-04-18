@@ -1,0 +1,6 @@
+src/models/
+logs/
+results/
+*.docx
+her2st/
+data/

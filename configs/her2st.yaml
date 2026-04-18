@@ -1,0 +1,56 @@
+dataset: her2st
+data_dir: data/her2st
+n_genes: 250
+n_patients: 8
+cv_strategy: lopcv
+
+model:
+  d_model: 512
+  n_genes: 250
+
+  # Per-dataset hyperparameters from TRIPLEX paper Table 14 (HER2ST = BC1):
+  target_encoder: {}  # no hyperparams needed
+
+  neighbor_encoder:
+    depth: 3        # depth3 for BC1
+    num_heads: 16   # num_heads3 for BC1
+    mlp_ratio: 1    # mlp_ratio3 for BC1
+    dropout: 0.3    # dropout3 for BC1
+
+  global_encoder:
+    depth: 3        # depth2 for BC1
+    num_heads: 16   # num_heads2 for BC1
+    mlp_ratio: 4    # mlp_ratio2 for BC1
+    dropout: 0.1    # dropout2 for BC1
+
+  fusion_layer:
+    depth: 1        # depth1 for BC1
+    num_heads: 4    # num_heads1 for BC1
+    mlp_ratio: 4    # mlp_ratio1 for BC1
+    dropout: 0.2    # dropout1 for BC1
+
+training:
+  seed: 2021
+  max_epochs: 200
+  early_stopping_patience: 20
+  early_stopping_metric: pcc_m
+  optimizer: adam
+  lr: 0.0001
+  scheduler: step_lr
+  step_size: 50
+  gamma: 0.9
+  batch_size: 128
+  mixed_precision: true
+  alpha: 0.5
+
+mcspr:
+  enabled: false          # set true for TRIPLEX_MCSPR run
+  n_modules: 15
+  n_contexts: 6
+  k_min: 30.0
+  tau: 1.0e-6
+  beta: 0.9
+  lambda_max: 0.1
+  warmup_epochs: 5
+  ramp_epochs: 10
+  attachment_point: fusion   # which prediction head Y_hat comes from
