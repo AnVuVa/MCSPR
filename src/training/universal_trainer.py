@@ -203,10 +203,11 @@ def train_one_fold(
 
         # Drift check
         if drift_tracker is not None:
+            n_genes_dt = drift_tracker.quartile_labels.shape[0]
             drift_tracker.update(
                 epoch=epoch,
-                Y_pred=np.zeros((1, 250)),  # placeholder for per-gene tracking
-                Y_true=np.zeros((1, 250)),
+                Y_pred=np.zeros((1, n_genes_dt)),  # placeholder for per-gene tracking
+                Y_true=np.zeros((1, n_genes_dt)),
                 mcspr_loss=epoch_mcspr / max(n_batches, 1),
             )
 

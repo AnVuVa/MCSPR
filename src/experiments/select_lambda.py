@@ -159,37 +159,55 @@ def evaluate_lambda(
 
     internal_train, internal_val = split_internal(fold_1_train_samples)
 
-    train_loader, val_loader = build_internal_loaders(
-        data_dir=data_dir,
-        dataset=dataset,
-        train_samples=internal_train,
-        val_samples=internal_val,
-        config=config,
-        fold_idx=FOLD_FOR_SELECTION,
-    )
+    ckpt_path = output_dir / f"lambda_{lambda_val}" / "fold_99" / "best_model.pt"
 
-    # Override training config for this sweep
-    sweep_config = {**config.get("training", {}), **config.get("mcspr", {})}
-    sweep_config["lambda_max"] = lambda_val
-    sweep_config["max_epochs"] = 20   # Short run for selection only
-    sweep_config["early_stopping_patience"] = 10
+    # Resume-friendly: if a best_model.pt from a prior run exists, skip training
+    # and only load + evaluate. Baseline (~100 min) and any prior lambda sweep
+    # survive crashes this way.
+    if ckpt_path.exists():
+        print(f"  Found existing checkpoint for lambda={lambda_val} — "
+              f"loading, skipping training.")
+        _, val_loader = build_internal_loaders(
+            data_dir=data_dir,
+            dataset=dataset,
+            train_samples=internal_train,
+            val_samples=internal_val,
+            config=config,
+            fold_idx=FOLD_FOR_SELECTION,
+        )
+        train_loader = None
+    else:
+        train_loader, val_loader = build_internal_loaders(
+            data_dir=data_dir,
+            dataset=dataset,
+            train_samples=internal_train,
+            val_samples=internal_val,
+            config=config,
+            fold_idx=FOLD_FOR_SELECTION,
+        )
 
-    model = TRIPLEX(config, n_genes=config.get("n_genes", 250))
+        # Override training config for this sweep
+        sweep_config = {**config.get("training", {}), **config.get("mcspr", {})}
+        sweep_config["lambda_max"] = lambda_val
+        sweep_config["max_epochs"] = 20   # Short run for selection only
+        sweep_config["early_stopping_patience"] = 10
 
-    fold_result = train_one_fold(
-        model=model,
-        model_type="triplex",
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=sweep_config,
-        fold_idx=99,   # Sentinel fold idx -- not a real fold
-        output_dir=output_dir / f"lambda_{lambda_val}",
-        mcspr_artifacts=mcspr_artifacts if lambda_val > 0 else None,
-        dry_run=False,
-    )
+        model = TRIPLEX(config, n_genes=config.get("n_genes", 250))
+
+        fold_result = train_one_fold(
+            model=model,
+            model_type="triplex",
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=sweep_config,
+            fold_idx=99,   # Sentinel fold idx -- not a real fold
+            output_dir=output_dir / f"lambda_{lambda_val}",
+            mcspr_artifacts=mcspr_artifacts if lambda_val > 0 else None,
+            dry_run=False,
+        )
 
     # Load best checkpoint and evaluate
-    ckpt_path = output_dir / f"lambda_{lambda_val}" / "fold_99" / "best_model.pt"
+    model = TRIPLEX(config, n_genes=config.get("n_genes", 250))
     ckpt = torch.load(ckpt_path, map_location="cpu")
     model.load_state_dict(ckpt["model"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -213,6 +231,13 @@ def evaluate_lambda(
         "drift_triggered": drift_triggered,
     }
 
+    # Persist per-lambda result so parallel subset runs and the --finalize
+    # aggregator can read individual sweep outcomes from disk.
+    per_lambda_json = output_dir / f"lambda_{lambda_val}" / "result.json"
+    per_lambda_json.parent.mkdir(parents=True, exist_ok=True)
+    with open(per_lambda_json, "w") as f:
+        json.dump(result, f, indent=2)
+
     # Explicit cleanup so WSI PIL caches, mmap refs, and CUDA tensors are
     # released before the next lambda iteration spins up a new dataset+model.
     # Without this, WSL's OOM killer can SIGKILL the process between sweeps.
@@ -235,6 +260,18 @@ def main():
                         help="Override config training.num_workers. "
                              "Use 0 to avoid WSL OOM-kill from multi-proc "
                              "DataLoader workers holding WSI objects.")
+    parser.add_argument("--lambda_subset", type=str, default=None,
+                        help="Comma-separated list of lambda values to sweep "
+                             "(e.g. '0.01,0.05'). When set, the script runs "
+                             "ONLY these values and does not write "
+                             "selected_lambda.json — used for GPU-parallel "
+                             "sweeps. Baseline (lambda=0) still runs if its "
+                             "cached metrics file (baseline.json) is absent.")
+    parser.add_argument("--finalize", action="store_true",
+                        help="Aggregate all per-lambda result.json files "
+                             "under results/lambda_selection/{dataset}/ and "
+                             "write selected_lambda.json. No training. Run "
+                             "after all --lambda_subset processes complete.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -302,42 +339,99 @@ def main():
         print("dry-run complete, exiting.")
         return
 
-    # Step 0: Establish baseline PCC(M) and Q1 MSE (no MCSPR)
-    print("\nStep 0: Establishing baseline (lambda=0, no MCSPR)...")
-    baseline_result = evaluate_lambda(
-        lambda_val=0.0,
-        config=config,
-        fold_1_train_samples=fold_1_train,
-        baseline_q1_mse=0.0,   # No drift check for baseline
-        data_dir=data_dir,
-        dataset=dataset,
-        mcspr_artifacts=None,  # No MCSPR for baseline
-        output_dir=out_dir,
-    )
-    baseline_pcc = baseline_result["pcc_m"]
-    baseline_q1_mse = baseline_result["q1_mse"]
-    print(f"  Baseline: PCC(M)={baseline_pcc:.4f}  Q1_MSE={baseline_q1_mse:.4f}")
+    baseline_json = out_dir / "baseline.json"
 
-    # Step 1: Sweep lambda grid
-    sweep_results = []
-    for lam in LAMBDA_GRID:
-        print(f"\nSweeping lambda={lam}...")
-        result = evaluate_lambda(
-            lambda_val=lam,
-            config=config,
-            fold_1_train_samples=fold_1_train,
-            baseline_q1_mse=baseline_q1_mse,
-            data_dir=data_dir,
-            dataset=dataset,
-            mcspr_artifacts=mcspr_artifacts,
-            output_dir=out_dir,
-        )
-        delta_pcc = result["pcc_m"] - baseline_pcc
-        result["delta_pcc"] = delta_pcc
-        sweep_results.append(result)
-        print(f"  lambda={lam}: PCC(M)={result['pcc_m']:.4f} "
-              f"delta_PCC={delta_pcc:+.4f} "
-              f"drift={'YES' if result['drift_triggered'] else 'no'}")
+    # --finalize mode: read all per-lambda result.json files (plus baseline.json)
+    # and write selected_lambda.json. No training.
+    if args.finalize:
+        if not baseline_json.exists():
+            raise FileNotFoundError(
+                f"baseline.json missing at {baseline_json}. "
+                f"Run a non-finalize pass first to establish baseline."
+            )
+        with open(baseline_json) as f:
+            baseline_cache = json.load(f)
+        baseline_pcc = baseline_cache["pcc_m"]
+        baseline_q1_mse = baseline_cache["q1_mse"]
+
+        sweep_results = []
+        missing = []
+        for lam in LAMBDA_GRID:
+            per = out_dir / f"lambda_{lam}" / "result.json"
+            if not per.exists():
+                missing.append(lam)
+                continue
+            with open(per) as f:
+                r = json.load(f)
+            r["delta_pcc"] = r["pcc_m"] - baseline_pcc
+            sweep_results.append(r)
+        if missing:
+            raise FileNotFoundError(
+                f"Missing per-lambda result.json for: {missing}. "
+                f"Run --lambda_subset for those values first."
+            )
+        # Fall through to selection block below with sweep_results populated.
+    else:
+        # Baseline: run once, cache metrics to baseline.json for subset runs.
+        if baseline_json.exists():
+            with open(baseline_json) as f:
+                baseline_cache = json.load(f)
+            baseline_pcc = baseline_cache["pcc_m"]
+            baseline_q1_mse = baseline_cache["q1_mse"]
+            print(f"  Baseline cached: PCC(M)={baseline_pcc:.4f}  "
+                  f"Q1_MSE={baseline_q1_mse:.4f}")
+        else:
+            print("\nStep 0: Establishing baseline (lambda=0, no MCSPR)...")
+            baseline_result = evaluate_lambda(
+                lambda_val=0.0,
+                config=config,
+                fold_1_train_samples=fold_1_train,
+                baseline_q1_mse=0.0,
+                data_dir=data_dir,
+                dataset=dataset,
+                mcspr_artifacts=None,
+                output_dir=out_dir,
+            )
+            baseline_pcc = baseline_result["pcc_m"]
+            baseline_q1_mse = baseline_result["q1_mse"]
+            with open(baseline_json, "w") as f:
+                json.dump({"pcc_m": baseline_pcc, "q1_mse": baseline_q1_mse}, f)
+            print(f"  Baseline: PCC(M)={baseline_pcc:.4f}  "
+                  f"Q1_MSE={baseline_q1_mse:.4f}")
+
+        # Determine which lambda values this process handles
+        if args.lambda_subset:
+            lambdas_to_run = [float(x) for x in args.lambda_subset.split(",")]
+            print(f"\nSubset mode: running {lambdas_to_run} only "
+                  f"(no final aggregation).")
+        else:
+            lambdas_to_run = list(LAMBDA_GRID)
+
+        sweep_results = []
+        for lam in lambdas_to_run:
+            print(f"\nSweeping lambda={lam}...")
+            result = evaluate_lambda(
+                lambda_val=lam,
+                config=config,
+                fold_1_train_samples=fold_1_train,
+                baseline_q1_mse=baseline_q1_mse,
+                data_dir=data_dir,
+                dataset=dataset,
+                mcspr_artifacts=mcspr_artifacts,
+                output_dir=out_dir,
+            )
+            delta_pcc = result["pcc_m"] - baseline_pcc
+            result["delta_pcc"] = delta_pcc
+            sweep_results.append(result)
+            print(f"  lambda={lam}: PCC(M)={result['pcc_m']:.4f} "
+                  f"delta_PCC={delta_pcc:+.4f} "
+                  f"drift={'YES' if result['drift_triggered'] else 'no'}")
+
+        # Subset mode exits without writing selected_lambda.json.
+        if args.lambda_subset:
+            print(f"\nSubset complete. Per-lambda results saved under "
+                  f"{out_dir}. Run `--finalize` after all subsets finish.")
+            return
 
     # Step 2: Select best lambda that does not trigger drift
     valid = [r for r in sweep_results if not r["drift_triggered"]]
