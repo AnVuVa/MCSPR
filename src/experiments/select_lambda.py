@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import random
 import sys
@@ -108,22 +109,33 @@ def build_internal_loaders(
         global_feat_dir=str(gf_dir) if gf_dir else None,
     )
 
-    train_loader = DataLoader(
+    from src.data.loaders import SlideBatchSampler
+    pin_memory = bool(tc.get("pin_memory", False))
+    train_batch_sampler = SlideBatchSampler(
         train_ds,
         batch_size=tc.get("batch_size", 128),
         shuffle=True,
+        drop_last=True,
+    )
+    train_loader = DataLoader(
+        train_ds,
+        batch_sampler=train_batch_sampler,
         collate_fn=slide_collate_fn,
         num_workers=tc.get("num_workers", 4),
-        pin_memory=True,
-        drop_last=True,
+        pin_memory=pin_memory,
+    )
+    val_batch_sampler = SlideBatchSampler(
+        val_ds,
+        batch_size=tc.get("batch_size", 128),
+        shuffle=False,
+        drop_last=False,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=1,
-        shuffle=False,
+        batch_sampler=val_batch_sampler,
         collate_fn=slide_collate_fn,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     return train_loader, val_loader
 
@@ -193,13 +205,23 @@ def evaluate_lambda(
             print(f"  lambda={lambda_val}: DRIFT triggered "
                   f"(Q1 MSE +{q1_increase:.1%} above baseline)")
 
-    return {
+    result = {
         "lambda": lambda_val,
         "pcc_m": metrics["pcc_m"],
         "q1_mse": metrics.get("q1_mse", 0.0),
         "rvd": metrics.get("rvd", 0.0),
         "drift_triggered": drift_triggered,
     }
+
+    # Explicit cleanup so WSI PIL caches, mmap refs, and CUDA tensors are
+    # released before the next lambda iteration spins up a new dataset+model.
+    # Without this, WSL's OOM killer can SIGKILL the process between sweeps.
+    del model, train_loader, val_loader, ckpt, metrics
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return result
 
 
 def main():
@@ -209,10 +231,18 @@ def main():
     parser.add_argument("--dry_run", action="store_true",
                         help="Verify config and precomputed artifacts, "
                              "then exit without training.")
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="Override config training.num_workers. "
+                             "Use 0 to avoid WSL OOM-kill from multi-proc "
+                             "DataLoader workers holding WSI objects.")
     args = parser.parse_args()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.num_workers is not None:
+        config.setdefault("training", {})["num_workers"] = args.num_workers
+        print(f"num_workers override: {args.num_workers}")
 
     dataset = config["dataset"]
     data_dir = config["data_dir"]

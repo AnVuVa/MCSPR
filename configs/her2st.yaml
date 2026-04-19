@@ -1,12 +1,12 @@
 dataset: her2st
 data_dir: data/her2st
-n_genes: 250
+n_genes: 300
 n_patients: 8
 cv_strategy: lopcv
 
 model:
   d_model: 512
-  n_genes: 250
+  n_genes: 300
 
   # Per-dataset hyperparameters from TRIPLEX paper Table 14 (HER2ST = BC1):
   target_encoder: {}  # no hyperparams needed
@@ -42,6 +42,8 @@ training:
   batch_size: 128
   mixed_precision: true
   alpha: 0.5
+  num_workers: 0
+  pin_memory: false
 
 mcspr:
   enabled: false          # set true for TRIPLEX_MCSPR run

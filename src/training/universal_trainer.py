@@ -301,19 +301,24 @@ def _patch_based_step(
     Batch is a dict of stacked tensors from StratifiedContextSampler.
     One batch = multiple spots from multiple slides.
     """
-    Y_true = batch["expression"].to(device)
-    ctx_w = batch["context_weights"].to(device)
+    # Move all batch tensors to device (TRIPLEX's forward reads raw batch dict).
+    batch = {
+        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+        for k, v in batch.items()
+    }
+    Y_true = batch["expression"]
+    ctx_w = batch["context_weights"]
 
     if hasattr(model, "forward_patch_based"):
         preds = model.forward_patch_based(batch, device)
     else:
         preds = model(batch)
 
-    # MCSPR attaches to fusion prediction (TRIPLEX) or direct output (ST-Net)
+    # TRIPLEX returns (preds_dict, tokens_dict); ST-Net returns a Tensor.
+    if isinstance(preds, tuple):
+        preds = preds[0]
     if isinstance(preds, dict):
         Y_hat = preds.get("fusion", preds.get("output"))
-    elif isinstance(preds, tuple):
-        Y_hat = preds[0]
     else:
         Y_hat = preds
 
@@ -408,12 +413,16 @@ def _evaluate(
                     grid_norm = slide_dict["grid_norm"].to(device)
                     Y_hat, _ = model(patches, grid_norm)
                 else:
-                    Y_true = slide_dict["expression"].to(device)
+                    slide_dict = {
+                        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                        for k, v in slide_dict.items()
+                    }
+                    Y_true = slide_dict["expression"]
                     preds = model(slide_dict)
+                    if isinstance(preds, tuple):
+                        preds = preds[0]
                     if isinstance(preds, dict):
                         Y_hat = preds.get("fusion", preds.get("output"))
-                    elif isinstance(preds, tuple):
-                        Y_hat = preds[0]
                     else:
                         Y_hat = preds
 
