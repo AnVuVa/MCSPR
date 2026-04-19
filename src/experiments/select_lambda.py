@@ -354,22 +354,27 @@ def main():
         baseline_pcc = baseline_cache["pcc_m"]
         baseline_q1_mse = baseline_cache["q1_mse"]
 
+        # Scan all lambda_*/result.json dirs so lambda=0 (baseline as a
+        # candidate) and any future grid extensions are picked up without
+        # requiring code edits.
         sweep_results = []
-        missing = []
-        for lam in LAMBDA_GRID:
-            per = out_dir / f"lambda_{lam}" / "result.json"
+        found = []
+        for d in sorted(out_dir.glob("lambda_*")):
+            per = d / "result.json"
             if not per.exists():
-                missing.append(lam)
                 continue
             with open(per) as f:
                 r = json.load(f)
             r["delta_pcc"] = r["pcc_m"] - baseline_pcc
             sweep_results.append(r)
+            found.append(r["lambda"])
+        missing = [l for l in LAMBDA_GRID if l not in found]
         if missing:
             raise FileNotFoundError(
                 f"Missing per-lambda result.json for: {missing}. "
                 f"Run --lambda_subset for those values first."
             )
+        print(f"Finalize: candidates = {sorted(found)}")
         # Fall through to selection block below with sweep_results populated.
     else:
         # Baseline: run once, cache metrics to baseline.json for subset runs.

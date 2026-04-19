@@ -31,8 +31,9 @@ from src.models.histogene import HisToGene
 from src.training.universal_trainer import train_one_fold, _evaluate
 
 
-OOM_RETRIES = 3
-OOM_DECREMENT = 128
+OOM_RETRIES = 5
+OOM_DECREMENT = 64
+OOM_FLOOR = 128
 
 
 def set_seed(seed: int = 2021):
@@ -80,6 +81,8 @@ def _build_histogene(config):
         d_feat=hg_cfg.get("d_feat", 512),
         build_spatial_graph=hg_cfg.get("build_spatial_graph", False),
         k_neighbors=hg_cfg.get("k_neighbors", 8),
+        use_grad_checkpoint=hg_cfg.get("use_grad_checkpoint", True),
+        cnn_chunk_size=hg_cfg.get("cnn_chunk_size", 128),
     )
 
 
@@ -104,7 +107,7 @@ def _train_with_oom_guard(
             if "out of memory" not in msg.lower():
                 raise
             torch.cuda.empty_cache()
-            new_spots = max(128, max_spots - OOM_DECREMENT)
+            new_spots = max(OOM_FLOOR, max_spots - OOM_DECREMENT)
             print(f"  OOM at max_spots={max_spots}; retry "
                   f"{attempt + 1}/{OOM_RETRIES} with max_spots={new_spots}")
             if new_spots == max_spots:
@@ -177,7 +180,10 @@ def main():
     if args.fold >= 0 and not (0 <= args.fold < n_folds):
         raise ValueError(f"--fold {args.fold} out of range [0, {n_folds})")
 
-    initial_max_spots = config.get("training", {}).get("max_spots", 1024)
+    initial_max_spots = config.get("training", {}).get(
+        "histogene_max_spots",
+        config.get("training", {}).get("max_spots", 512),
+    )
     all_fold_metrics = []
 
     for fold_idx in fold_range:
@@ -204,6 +210,9 @@ def main():
             loader_cfg = {
                 **config,
                 "max_spots": max_spots,
+                "val_max_spots": config.get("training", {}).get(
+                    "histogene_val_max_spots", max_spots * 2
+                ),
                 "seed": seed,
                 "num_workers": config.get("training", {}).get("num_workers", 2),
                 "patch_size": config.get("patch_size", 224),

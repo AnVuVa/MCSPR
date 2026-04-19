@@ -29,6 +29,14 @@ model:
     mlp_ratio: 4    # mlp_ratio1 for BC1
     dropout: 0.2    # dropout1 for BC1
 
+  histogene:
+    n_layers: 4
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.2
+    use_grad_checkpoint: true   # recompute activations on backward — frees ~1.5 GB
+    cnn_chunk_size: 128         # patch CNN chunk to bound peak memory
+
 training:
   seed: 2021
   max_epochs: 200
@@ -44,6 +52,10 @@ training:
   alpha: 0.5
   num_workers: 0
   pin_memory: false
+  # HisToGene-specific whole-slide cap. Train hits backward (activations);
+  # val runs under no_grad so can be larger.
+  histogene_max_spots: 512
+  histogene_val_max_spots: 712  # HER2ST max slide size
 
 mcspr:
   enabled: false          # set true for TRIPLEX_MCSPR run
