@@ -47,10 +47,17 @@ def main():
         "--output_dir", type=str, default=None,
         help="Override default output directory."
     )
+    parser.add_argument(
+        "--use_normalized_mse", action="store_true",
+        help="Override config: enable L_norm (per-gene variance-normalized MSE)."
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.use_normalized_mse:
+        config.setdefault("training", {})["use_normalized_mse"] = True
 
     dataset = config["dataset"]
     data_dir = config["data_dir"]

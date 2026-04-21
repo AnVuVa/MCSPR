@@ -35,6 +35,9 @@ class MCSPRLoss(nn.Module):
         self.register_buffer(
             "ema_initialized", torch.zeros(n_contexts, dtype=torch.bool)
         )
+        self.register_buffer(
+            "ema_step", torch.zeros(n_contexts, dtype=torch.long)
+        )
 
     def forward(
         self,
@@ -78,8 +81,11 @@ class MCSPRLoss(nn.Module):
             #    E[ratio] != ratio of E[]. Always EMA on Sigma, then normalize after.
             with torch.no_grad():
                 if not self.ema_initialized[t]:
-                    self.ema_mu[t] = mu_t.detach()
-                    self.ema_Sigma[t] = Sigma_t.detach()
+                    # Zero-consistent warm start so Adam-style bias correction
+                    # is exact from step 1: EMA_1 = (1-β)·x_1 ⇒
+                    # Sigma_unbiased = EMA_1 / (1-β^1) = x_1 exactly.
+                    self.ema_mu[t] = (1.0 - self.beta) * mu_t.detach()
+                    self.ema_Sigma[t] = (1.0 - self.beta) * Sigma_t.detach()
                     self.ema_sigma_sq[t] = torch.diag(Sigma_t).detach()
                     self.ema_initialized[t] = True
                 else:
@@ -92,21 +98,27 @@ class MCSPRLoss(nn.Module):
                         + (1 - self.beta) * Sigma_t.detach()
                     )
                     self.ema_sigma_sq[t] = torch.diag(self.ema_Sigma[t])
+                self.ema_step[t] += 1
 
-            # g) Normalized correlation using EMA variance for denominator (stable)
-            #    and current-batch Sigma_t for numerator (carries gradient).
+            # Bias-correct EMA moments (Adam-style); local, no grad.
+            bias_correction = 1.0 - self.beta ** self.ema_step[t].item()
+            Sigma_unbiased = self.ema_Sigma[t] / bias_correction
+
+            # g) Normalized correlation using bias-corrected EMA variance for
+            #    denominator (stable) and current-batch Sigma_t for numerator
+            #    (carries gradient). tau already inside std_a — no double-tau.
             std_a = torch.sqrt(
-                self.ema_sigma_sq[t] + self.tau
-            )  # (B,) — no gradient (from buffer)
+                Sigma_unbiased.diag().detach() + self.tau
+            )  # (B,) — no gradient
             denom = (
                 std_a.unsqueeze(1) * std_a.unsqueeze(0)
             )  # (B, B) — no gradient
-            C_hat_t = Sigma_t / (denom + self.tau)  # (B, B) — HAS gradient via Sigma_t
+            C_hat_t = Sigma_t / denom  # (B, B) — HAS gradient via Sigma_t
             C_hat_t = torch.clamp(C_hat_t, -1.0, 1.0)
 
-            # h) Per-context Frobenius loss
+            # h) Per-context Frobenius loss — fp32 to avoid fp16 overflow under AMP
             loss_t = (1.0 / eff_n) * torch.sum(
-                (C_hat_t - self.C_prior[t]) ** 2
+                (C_hat_t.float() - self.C_prior[t].float()) ** 2
             )
 
             # i) Log diagnostics

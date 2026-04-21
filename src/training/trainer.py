@@ -55,6 +55,26 @@ def train_one_fold(
     # Loss functions
     triplex_loss_fn = TRIPLEXLoss(alpha=alpha)
 
+    # L_norm toggle: swap TRIPLEXLoss's internal .mse attribute with
+    # NormalizedMSELoss (fold-local gene_var). Keeps triplex_loss.py untouched;
+    # all four branch/fusion MSE calls now use variance-normalized residuals.
+    if tc.get("use_normalized_mse", False):
+        from src.losses import NormalizedMSELoss
+        data_dir = config["data_dir"]
+        gene_var_path = Path(data_dir) / "nmf" / f"fold_{fold_idx}" / "gene_var.npy"
+        if not gene_var_path.exists():
+            raise FileNotFoundError(
+                f"use_normalized_mse=true but {gene_var_path} not found — "
+                f"run src/data/precompute.py or the standalone gene_var export first."
+            )
+        gene_var = np.load(str(gene_var_path))
+        triplex_loss_fn.mse = NormalizedMSELoss(gene_var).to(device)
+        print(
+            f"  [use_normalized_mse=True] swapped MSE → NormalizedMSELoss "
+            f"(gene_var: shape={gene_var.shape} "
+            f"min={gene_var.min():.4e} max={gene_var.max():.4e})"
+        )
+
     # MCSPR setup
     mcspr_loss_fn = None
     lambda_scheduler = None

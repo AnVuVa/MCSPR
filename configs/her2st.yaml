@@ -56,6 +56,10 @@ training:
   # val runs under no_grad so can be larger.
   histogene_max_spots: 512
   histogene_val_max_spots: 712  # HER2ST max slide size
+  # L_norm toggle: when true, TRIPLEX reconstruction MSE is replaced by
+  # NormalizedMSELoss(gene_var) loaded from data/her2st/nmf/fold_{i}/gene_var.npy.
+  # MCSPR term (if enabled) is unchanged and additive on top.
+  use_normalized_mse: false
 
 mcspr:
   enabled: false          # set true for TRIPLEX_MCSPR run
@@ -64,7 +68,7 @@ mcspr:
   k_min: 30.0
   tau: 1.0e-6
   beta: 0.9
-  lambda_max: 0.1
-  warmup_epochs: 5
-  ramp_epochs: 10
+  lambda_max: 0.10         # overridden at runtime by selected_lambda.json; kept in sync for clarity
+  warmup_epochs: 0         # constant-lambda protocol (Apr 19 2026): no warmup
+  ramp_epochs: 0           # constant-lambda protocol: no ramp-in
   attachment_point: fusion   # which prediction head Y_hat comes from
