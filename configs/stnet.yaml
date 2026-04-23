@@ -39,7 +39,7 @@ training:
   scheduler: step_lr
   step_size: 50
   gamma: 0.9
-  batch_size: 128
+  batch_size: 256        # spec v2 confirmed 2026-04-22 (STNet ~3GB at 128, safe at 256)
   mixed_precision: true
   alpha: 0.5
 

@@ -49,7 +49,11 @@ def _mcspr_loss_from_artifacts(
     config: Dict,
     device: torch.device,
 ) -> MCSPRLoss:
-    """Instantiate MCSPRLoss from precomputed NMF artifacts."""
+    """Instantiate MCSPRLoss from precomputed NMF artifacts.
+
+    Spec v2: n_modules is derived from M_pinv.shape[0] inside MCSPRLoss
+    and is not a constructor argument.
+    """
     return MCSPRLoss(
         M_pinv=torch.tensor(
             artifacts["M_pinv"], dtype=torch.float32
@@ -57,10 +61,9 @@ def _mcspr_loss_from_artifacts(
         C_prior=torch.tensor(
             artifacts["C_prior"], dtype=torch.float32
         ).to(device),
-        n_modules=artifacts["n_modules"],
         n_contexts=config.get("n_contexts", 6),
         k_min=config.get("k_min", 30.0),
-        tau=config.get("tau", 1e-6),
+        tau=config.get("tau", 1e-4),
         beta=config.get("beta", 0.9),
         lambda_max=config.get("lambda_max", 0.1),
     ).to(device)
@@ -138,8 +141,22 @@ def train_one_fold(
     else:
         print("MCSPR disabled — pure MSE baseline")
 
-    # MSE loss (shared by both branches)
-    mse_loss_fn = nn.MSELoss()
+    # Reconstruction loss — spec v2 amendment A8: NormalizedMSELoss uses
+    # per-gene variance from counts_svg log-normalized training targets.
+    if config.get("use_normalized_mse", False):
+        from src.losses.normalized_mse import NormalizedMSELoss
+        gene_var_path = (
+            Path(config["data_dir"]) / "nmf" / f"fold_{fold_idx}" / "gene_var.npy"
+        )
+        gene_var = np.load(str(gene_var_path))
+        mse_loss_fn = NormalizedMSELoss(gene_var).to(device)
+        print(
+            f"  [use_normalized_mse=True] NormalizedMSELoss gene_var: "
+            f"shape={gene_var.shape} "
+            f"min={gene_var.min():.4e} max={gene_var.max():.4e}"
+        )
+    else:
+        mse_loss_fn = nn.MSELoss()
 
     # Training state
     max_epochs = config.get("max_epochs", 200)
@@ -316,10 +333,13 @@ def _patch_based_step(
         preds = model(batch)
 
     # TRIPLEX returns (preds_dict, tokens_dict); ST-Net returns a Tensor.
+    # Spec v2 amendment A7: MCSPR attaches to preds['output'] (R^300 gene
+    # expression space), NOT preds['fusion'] (latent). NMF prior domain is
+    # the 300-gene panel, so attachment must be in gene space for both archs.
     if isinstance(preds, tuple):
         preds = preds[0]
     if isinstance(preds, dict):
-        Y_hat = preds.get("fusion", preds.get("output"))
+        Y_hat = preds.get("output", preds.get("fusion"))
     else:
         Y_hat = preds
 
@@ -328,7 +348,9 @@ def _patch_based_step(
     mcspr_val = torch.tensor(0.0, device=device, requires_grad=True)
     diag: Dict = {"n_active_contexts": 0}
     if mcspr_loss_fn is not None:
-        mcspr_val, diag = mcspr_loss_fn(Y_hat, ctx_w, lambda_scale)
+        # Spec v2: forward returns scalar L_MCSPR; diagnostics via side-channel
+        mcspr_val = mcspr_loss_fn(Y_hat, ctx_w, lambda_scale)
+        diag = dict(mcspr_loss_fn._last_diagnostics)
 
     return mse_loss, mcspr_val, diag
 
@@ -367,9 +389,9 @@ def _graph_based_step(
         # EMA buffers accumulate whatever context diversity exists
         # Cross-slide accumulation happens naturally over successive passes
         if mcspr_loss_fn is not None:
-            slide_mcspr, slide_diag = mcspr_loss_fn(
-                Y_hat, ctx_w, lambda_scale
-            )
+            # Spec v2: forward returns scalar L_MCSPR; diagnostics via side-channel
+            slide_mcspr = mcspr_loss_fn(Y_hat, ctx_w, lambda_scale)
+            slide_diag = mcspr_loss_fn._last_diagnostics
             total_mcspr = total_mcspr + slide_mcspr
             combined_diag["n_active_contexts"] = max(
                 combined_diag["n_active_contexts"],
@@ -423,7 +445,8 @@ def _evaluate(
                     if isinstance(preds, tuple):
                         preds = preds[0]
                     if isinstance(preds, dict):
-                        Y_hat = preds.get("fusion", preds.get("output"))
+                        # Spec v2 A7: output space, not fusion
+                        Y_hat = preds.get("output", preds.get("fusion"))
                     else:
                         Y_hat = preds
 

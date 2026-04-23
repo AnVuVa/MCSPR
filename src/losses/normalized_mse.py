@@ -10,8 +10,10 @@ class NormalizedMSELoss(nn.Module):
     Divides each gene's squared residual by its training-fold variance,
     making lambda a dimensionless ratio independent of gene expression scale.
 
-    gene_var: np.ndarray of shape (m_genes,), computed from log-normalized
-              SPCS-smoothed training targets (fold-specific, no test leakage).
+    gene_var: np.ndarray of shape (m_genes,), computed from counts_svg
+              log-normalized training targets (fold-specific, no test leakage).
+              Spec v2 amendment A8: source is counts_svg (matches 300-gene
+              model target), not counts_spcs.
     """
 
     def __init__(self, gene_var: np.ndarray):

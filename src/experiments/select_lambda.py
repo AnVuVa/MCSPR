@@ -159,7 +159,7 @@ def evaluate_lambda(
 
     internal_train, internal_val = split_internal(fold_1_train_samples)
 
-    ckpt_path = output_dir / f"lambda_{lambda_val}" / "fold_99" / "best_model.pt"
+    ckpt_path = output_dir / f"lambda_{lambda_val}" / f"fold_{FOLD_FOR_SELECTION}" / "best_model.pt"
 
     # Resume-friendly: if a best_model.pt from a prior run exists, skip training
     # and only load + evaluate. Baseline (~100 min) and any prior lambda sweep
@@ -186,21 +186,32 @@ def evaluate_lambda(
             fold_idx=FOLD_FOR_SELECTION,
         )
 
-        # Override training config for this sweep
-        sweep_config = {**config.get("training", {}), **config.get("mcspr", {})}
+        # Spec v2: sweep config must carry top-level keys (data_dir, dataset,
+        # n_genes, n_folds, use_normalized_mse) so train_one_fold can locate
+        # gene_var.npy and construct NormalizedMSELoss. Previously only
+        # training + mcspr subsections were merged — caused KeyError on
+        # data_dir lookup.
+        sweep_config = {
+            k: v for k, v in config.items()
+            if k not in ("training", "mcspr", "model")
+        }
+        sweep_config.update(config.get("training", {}))
+        sweep_config.update(config.get("mcspr", {}))
         sweep_config["lambda_max"] = lambda_val
         sweep_config["max_epochs"] = 20   # Short run for selection only
         sweep_config["early_stopping_patience"] = 10
 
         model = TRIPLEX(config, n_genes=config.get("n_genes", 250))
 
+        # fold_idx = FOLD_FOR_SELECTION (1) so gene_var.npy is loaded from
+        # nmf/fold_1/ — matches the fold the selection runs on.
         fold_result = train_one_fold(
             model=model,
             model_type="triplex",
             train_loader=train_loader,
             val_loader=val_loader,
             config=sweep_config,
-            fold_idx=99,   # Sentinel fold idx -- not a real fold
+            fold_idx=FOLD_FOR_SELECTION,
             output_dir=output_dir / f"lambda_{lambda_val}",
             mcspr_artifacts=mcspr_artifacts if lambda_val > 0 else None,
             dry_run=False,
@@ -253,6 +264,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="MCSPR lambda selection (anti-leakage protocol)")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument(
+        "--architecture", type=str, default="triplex",
+        choices=["triplex"],
+        help="Architecture to run selection on. Spec v2 locks to triplex; "
+             "selected λ is frozen for all architectures.",
+    )
     parser.add_argument("--dry_run", action="store_true",
                         help="Verify config and precomputed artifacts, "
                              "then exit without training.")
@@ -306,7 +323,10 @@ def main():
         return
     sample_names = sorted([p.stem for p in bc_dir.glob("*.csv")])
 
-    folds = build_lopcv_folds(sample_names, dataset)
+    # Spec v2: pass n_folds from config so her2st → 4-fold LOPCV
+    folds = build_lopcv_folds(
+        sample_names, dataset, n_folds=config.get("n_folds")
+    )
 
     # Use Fold 1 (index 1) training samples for selection
     fold_1_train, fold_1_val = folds[FOLD_FOR_SELECTION]

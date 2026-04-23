@@ -1,6 +1,12 @@
+"""MCSPR loss — MCSPR_FINAL_LOCKED_V2.md File 3 (amendments A1–A6).
+
+Interface: forward(Y_hat, context_weights, lambda_scale) → L_MCSPR (scalar).
+Diagnostics available as side-channel attribute ``self._last_diagnostics``.
+"""
+
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple
+from typing import Dict
 
 
 class MCSPRLoss(nn.Module):
@@ -9,15 +15,15 @@ class MCSPRLoss(nn.Module):
         self,
         M_pinv: torch.Tensor,
         C_prior: torch.Tensor,
-        n_modules: int,
         n_contexts: int,
         k_min: float = 30.0,
-        tau: float = 1e-6,
+        tau: float = 1.0e-4,
         beta: float = 0.9,
         lambda_max: float = 0.1,
     ):
         super().__init__()
-        self.n_modules = n_modules
+        B = int(M_pinv.shape[0])
+        self.n_modules = B
         self.n_contexts = n_contexts
         self.k_min = k_min
         self.tau = tau
@@ -26,12 +32,9 @@ class MCSPRLoss(nn.Module):
 
         self.register_buffer("M_pinv", M_pinv)
         self.register_buffer("C_prior", C_prior)
-        self.register_buffer("ema_mu", torch.zeros(n_contexts, n_modules))
-        self.register_buffer("ema_sigma_sq", torch.ones(n_contexts, n_modules))
-        self.register_buffer(
-            "ema_Sigma",
-            torch.eye(n_modules).unsqueeze(0).expand(n_contexts, -1, -1).clone(),
-        )
+        self.register_buffer("ema_mu", torch.zeros(n_contexts, B))
+        self.register_buffer("ema_Sigma", torch.zeros(n_contexts, B, B))
+        self.register_buffer("ema_sigma_sq", torch.zeros(n_contexts, B))
         self.register_buffer(
             "ema_initialized", torch.zeros(n_contexts, dtype=torch.bool)
         )
@@ -39,89 +42,95 @@ class MCSPRLoss(nn.Module):
             "ema_step", torch.zeros(n_contexts, dtype=torch.long)
         )
 
+        self._last_diagnostics: Dict = {}
+
     def forward(
         self,
         Y_hat: torch.Tensor,
         context_weights: torch.Tensor,
         lambda_scale: float = 1.0,
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> torch.Tensor:
         diagnostics: Dict = {}
 
-        # Step 1 — Project to module space
-        Z_hat = Y_hat @ self.M_pinv.T  # (n, B), gradient flows through this
+        # Project to NMF latent space — gradient flows through Y_hat
+        Z_hat = Y_hat @ self.M_pinv.T  # (N, B)
+        B_dim = Z_hat.shape[1]
 
-        total_loss = torch.tensor(0.0, device=Y_hat.device, dtype=Y_hat.dtype)
-        n_active_contexts = 0
+        total_loss = torch.tensor(
+            0.0, device=Y_hat.device, dtype=Y_hat.dtype
+        )
+        n_active = 0
 
-        # Step 2 — For each context t
         for t in range(self.n_contexts):
-            # a) Get soft weights
-            w_t = context_weights[:, t]  # (n,)
-
-            # b) Compute effective n
+            w_t = context_weights[:, t]  # (N,) frozen
             eff_n = w_t.sum().item()
 
-            # c) If eff_n < k_min: skip context. NEVER sample with replacement.
             if eff_n < self.k_min:
                 diagnostics[f"ctx_{t}_skipped"] = True
                 continue
 
-            n_active_contexts += 1
+            n_active += 1
 
-            # d) Soft-weighted mean
-            mu_t = (w_t.unsqueeze(1) * Z_hat).sum(0) / w_t.sum()  # (B,)
+            # Per-context soft-weighted batch mean and covariance (HAS grad)
+            w_sum = w_t.sum()
+            w_norm = (w_t / w_sum).unsqueeze(1)  # (N, 1)
+            mu_batch = (w_t.unsqueeze(1) * Z_hat).sum(0) / w_sum  # (B,)
+            z_c = Z_hat - mu_batch.unsqueeze(0)  # (N, B) centered
+            Sigma_batch_t = (z_c * w_norm).T @ z_c  # (B, B) HAS grad
 
-            # e) Soft-weighted covariance
-            z_centered = Z_hat - mu_t.unsqueeze(0)  # (n, B)
-            w_norm = (w_t / w_t.sum()).unsqueeze(1)  # (n, 1)
-            Sigma_t = (z_centered * w_norm).T @ z_centered  # (B, B)
-
-            # f) EMA update — on MOMENTS, NOT on normalized correlations.
-            #    CRITICAL: Never do ema_C[t] = beta * ema_C[t] + (1-beta) * C_hat_t.
-            #    E[ratio] != ratio of E[]. Always EMA on Sigma, then normalize after.
+            # ── Buffer update (no_grad); historical state severed ────────
             with torch.no_grad():
                 if not self.ema_initialized[t]:
-                    # Zero-consistent warm start so Adam-style bias correction
-                    # is exact from step 1: EMA_1 = (1-β)·x_1 ⇒
-                    # Sigma_unbiased = EMA_1 / (1-β^1) = x_1 exactly.
-                    self.ema_mu[t] = (1.0 - self.beta) * mu_t.detach()
-                    self.ema_Sigma[t] = (1.0 - self.beta) * Sigma_t.detach()
-                    self.ema_sigma_sq[t] = torch.diag(Sigma_t).detach()
+                    # ★ A1 — zero-consistent warm start
+                    self.ema_Sigma[t] = (
+                        (1.0 - self.beta) * Sigma_batch_t.detach()
+                    )
+                    self.ema_mu[t] = (1.0 - self.beta) * mu_batch.detach()
                     self.ema_initialized[t] = True
                 else:
-                    self.ema_mu[t] = (
-                        self.beta * self.ema_mu[t]
-                        + (1 - self.beta) * mu_t.detach()
-                    )
                     self.ema_Sigma[t] = (
-                        self.beta * self.ema_Sigma[t]
-                        + (1 - self.beta) * Sigma_t.detach()
+                        self.beta * self.ema_Sigma[t].detach()
+                        + (1.0 - self.beta) * Sigma_batch_t.detach()
                     )
-                    self.ema_sigma_sq[t] = torch.diag(self.ema_Sigma[t])
+                    self.ema_mu[t] = (
+                        self.beta * self.ema_mu[t].detach()
+                        + (1.0 - self.beta) * mu_batch.detach()
+                    )
                 self.ema_step[t] += 1
+                self.ema_sigma_sq[t] = torch.diag(self.ema_Sigma[t])
 
-            # Bias-correct EMA moments (Adam-style); local, no grad.
-            bias_correction = 1.0 - self.beta ** self.ema_step[t].item()
-            Sigma_unbiased = self.ema_Sigma[t] / bias_correction
+            # ── ★ A2 — gradient-carrying EMA recompute (OUTSIDE no_grad) ─
+            step = self.ema_step[t].item()
+            if step > 1:
+                # Historical buffer detached; current batch flows via (1-β)
+                ema_Sigma_with_grad = (
+                    self.beta * self.ema_Sigma[t].detach()
+                    + (1.0 - self.beta) * Sigma_batch_t
+                )
+            else:
+                # First-ever observation of context t — warm-start only
+                ema_Sigma_with_grad = (1.0 - self.beta) * Sigma_batch_t
 
-            # g) Normalized correlation using bias-corrected EMA variance for
-            #    denominator (stable) and current-batch Sigma_t for numerator
-            #    (carries gradient). tau already inside std_a — no double-tau.
+            # Bias correction (Adam-style)
+            bias_correction = 1.0 - self.beta ** step
+            Sigma_unbiased = ema_Sigma_with_grad / bias_correction
+
+            # Denominator: detached EMA std (no gradient)
             std_a = torch.sqrt(
                 Sigma_unbiased.diag().detach() + self.tau
-            )  # (B,) — no gradient
-            denom = (
-                std_a.unsqueeze(1) * std_a.unsqueeze(0)
-            )  # (B, B) — no gradient
-            C_hat_t = Sigma_t / denom  # (B, B) — HAS gradient via Sigma_t
+            )  # (B,) no grad
+            denom = std_a.unsqueeze(1) * std_a.unsqueeze(0)  # (B, B) no grad
+
+            # ── ★ A3 — C_hat_t numerator = Sigma_unbiased (not Sigma_batch_t) ──
+            # Diagonal = Σ_ii / (Σ_ii + τ) ≈ 1.0, valid correlation matrix
+            C_hat_t = Sigma_unbiased / denom
             C_hat_t = torch.clamp(C_hat_t, -1.0, 1.0)
 
-            # h) Per-context Frobenius loss — fp32 to avoid fp16 overflow under AMP
-            loss_t = (1.0 / eff_n) * torch.sum(
+            # ── ★ A4 — B² normalization (dim-invariant mean sq residual) ──
+            loss_t = (1.0 / (eff_n * B_dim * B_dim)) * torch.sum(
                 (C_hat_t.float() - self.C_prior[t].float()) ** 2
             )
 
-            # i) Log diagnostics
             diagnostics[f"ctx_{t}_eff_n"] = eff_n
             diagnostics[f"ctx_{t}_loss"] = loss_t.item()
             diagnostics[f"ctx_{t}_C_hat_diag_mean"] = (
@@ -130,11 +139,20 @@ class MCSPRLoss(nn.Module):
 
             total_loss = total_loss + loss_t
 
-        # Step 3 — Aggregate
-        if n_active_contexts > 0:
-            total_loss = (
-                (self.lambda_max * lambda_scale) * total_loss / n_active_contexts
-            )
-        diagnostics["n_active_contexts"] = n_active_contexts
+        diagnostics["n_active_contexts"] = n_active
         diagnostics["effective_lambda"] = self.lambda_max * lambda_scale
-        return total_loss, diagnostics
+        self._last_diagnostics = diagnostics
+
+        if n_active == 0:
+            # Zero loss that preserves autograd graph through Y_hat
+            return Y_hat.sum() * 0.0
+
+        # ── ★ A5 + A6 — fixed T denominator, 1/(1-β) gradient restoration ──
+        L_MCSPR = (
+            (self.lambda_max * lambda_scale)
+            * total_loss
+            / self.n_contexts
+        )
+        L_MCSPR = L_MCSPR / (1.0 - self.beta)
+
+        return L_MCSPR

@@ -2,6 +2,7 @@ dataset: her2st
 data_dir: data/her2st
 n_genes: 300
 n_patients: 8
+n_folds: 4          # spec v2: patient-paired 4-fold LOPCV (A,B | C,D | E,F | G,H)
 cv_strategy: lopcv
 
 model:
@@ -47,7 +48,7 @@ training:
   scheduler: step_lr
   step_size: 50
   gamma: 0.9
-  batch_size: 128
+  batch_size: 256        # spec v2 confirmed 2026-04-22 (peak 8059 MiB at fold 0, 50% headroom)
   mixed_precision: true
   alpha: 0.5
   num_workers: 0
@@ -63,7 +64,7 @@ training:
 
 mcspr:
   enabled: false          # set true for TRIPLEX_MCSPR run
-  n_modules: 15
+  n_modules: 10           # spec v2: smallest N_MODULES passing R²≥0.60 on all 4 folds
   n_contexts: 6
   k_min: 30.0
   tau: 1.0e-6

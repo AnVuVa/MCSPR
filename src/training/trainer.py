@@ -89,10 +89,9 @@ def train_one_fold(
             C_prior=torch.tensor(
                 mcspr_artifacts["C_prior"], dtype=torch.float32
             ).to(device),
-            n_modules=mcspr_artifacts["n_modules"],
             n_contexts=mcspr_artifacts["n_contexts"],
             k_min=mc.get("k_min", 30.0),
-            tau=mc.get("tau", 1e-6),
+            tau=mc.get("tau", 1e-4),
             beta=mc.get("beta", 0.9),
             lambda_max=mc.get("lambda_max", 0.1),
         ).to(device)
@@ -144,11 +143,14 @@ def train_one_fold(
                     if mcspr_loss_fn is not None:
                         lambda_scale = lambda_scheduler.get_scale(epoch)
                         context_w = b["context_weights"]
-                        mcspr_loss, mcspr_diag = mcspr_loss_fn(
-                            Y_hat=preds["fusion"],
+                        # Spec v2 A7: attach to preds['output'] not ['fusion']
+                        # Spec v2: forward returns scalar; diag via side-channel
+                        mcspr_loss = mcspr_loss_fn(
+                            Y_hat=preds["output"],
                             context_weights=context_w,
                             lambda_scale=lambda_scale,
                         )
+                        mcspr_diag = mcspr_loss_fn._last_diagnostics
                         total_loss = triplex_loss + mcspr_loss
                         epoch_mcspr_losses.append(mcspr_loss.item())
                         epoch_n_active.append(
@@ -168,11 +170,13 @@ def train_one_fold(
                 if mcspr_loss_fn is not None:
                     lambda_scale = lambda_scheduler.get_scale(epoch)
                     context_w = b["context_weights"]
-                    mcspr_loss, mcspr_diag = mcspr_loss_fn(
-                        Y_hat=preds["fusion"],
+                    # Spec v2 A7: preds['output'] (gene space, not fusion latent)
+                    mcspr_loss = mcspr_loss_fn(
+                        Y_hat=preds["output"],
                         context_weights=context_w,
                         lambda_scale=lambda_scale,
                     )
+                    mcspr_diag = mcspr_loss_fn._last_diagnostics
                     total_loss = triplex_loss + mcspr_loss
                     epoch_mcspr_losses.append(mcspr_loss.item())
                     epoch_n_active.append(
