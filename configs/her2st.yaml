@@ -55,7 +55,7 @@ training:
   pin_memory: false
   # HisToGene-specific whole-slide cap. Train hits backward (activations);
   # val runs under no_grad so can be larger.
-  histogene_max_spots: 512
+  histogene_max_spots: 256        # 512 OOMed on backward even with grad_checkpoint (RTX 5070 Ti 16GB, WSL2); 256 is safer. OOM guard retries 192→128→64 if needed.
   histogene_val_max_spots: 712  # HER2ST max slide size
   # L_norm toggle: when true, TRIPLEX reconstruction MSE is replaced by
   # NormalizedMSELoss(gene_var) loaded from data/her2st/nmf/fold_{i}/gene_var.npy.

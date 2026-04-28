@@ -1,0 +1,44 @@
+General:
+  seed: 2021                # match MCSPR baselines (configs/her2st.yaml training.seed)
+
+Data:
+  dataset: her2st
+  num_genes: 300            # 300-SVG panel
+  folds: 4                  # patient-paired 4-fold (A+B, C+D, E+F, G+H)
+  path: data/her2st
+  splits: data/her2st/splits/her2st_patient_split_manifest_4fold.json
+  counts_dir: counts_svg_spcs   # SPCS-smoothed 300-SVG (Python port of MERGE smooth.ipynb)
+
+CNN:
+  pretrained_path: ../MERGE/pretrained/model-low-v1.pth
+  batch_size: 8
+  epochs: 15
+  dropout: 0.2
+  optimizer:
+    type: adam
+    lr: 0.00005
+    weight_decay: 0.0
+  scheduler:
+    type: step
+    step_size: 2
+    gamma: 0.5
+
+GNN:
+  type: GAT
+  epochs: 400
+  attn_heads: 8
+  drop_edge: 0.2
+  optimizer:
+    type: adam
+    lr: 0.001
+    weight_decay: 0.0
+  scheduler:
+    type: warmup
+    warmup_steps: 10
+  hierarchical: True
+  clusters:
+    spatial: 5
+    feature: 5
+
+Loss:
+  mse: 1.0

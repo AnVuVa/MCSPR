@@ -4,7 +4,7 @@ Lambda selection for MCSPR -- anti-leakage protocol.
 Rules (from locked blueprint):
   1. Use Fold 1 training data ONLY (never test data)
   2. Split Fold 1 training data 80/20 (internal train / internal val)
-  3. Sweep lambda in {0.01, 0.05, 0.1, 0.5}
+  3. Sweep lambda in {0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0}
   4. Select lambda that maximizes Delta_PCC on internal val set
      WITHOUT triggering representation drift (Q1 MSE > 5% baseline increase)
   5. Save selected lambda to results/lambda_selection/{dataset}/selected_lambda.json
@@ -37,7 +37,7 @@ from src.training.universal_trainer import train_one_fold, _evaluate
 from torch.utils.data import DataLoader
 
 
-LAMBDA_GRID = [0.01, 0.05, 0.1, 0.5]
+LAMBDA_GRID = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
 FOLD_FOR_SELECTION = 1        # Fold 1 used for lambda selection (fixed)
 INTERNAL_VAL_FRACTION = 0.20  # 80/20 split within Fold 1 training data
 DRIFT_THRESHOLD = 0.05        # Max allowed Q1 MSE increase relative to baseline

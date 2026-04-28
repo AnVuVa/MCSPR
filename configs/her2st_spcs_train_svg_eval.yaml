@@ -1,0 +1,78 @@
+# Phase 2 fair-protocol config: train on SPCS-smoothed counts, evaluate on
+# canonical 300-SVG counts. Inherits all hyperparameters from her2st.yaml.
+# Used by HydraSTNet first; same shape applies to other patch-based baselines.
+
+dataset: her2st
+data_dir: data/her2st
+n_genes: 300
+n_patients: 8
+n_folds: 4
+cv_strategy: lopcv
+
+model:
+  d_model: 512
+  n_genes: 300
+
+  target_encoder: {}
+
+  neighbor_encoder:
+    depth: 3
+    num_heads: 16
+    mlp_ratio: 1
+    dropout: 0.3
+
+  global_encoder:
+    depth: 3
+    num_heads: 16
+    mlp_ratio: 4
+    dropout: 0.1
+
+  fusion_layer:
+    depth: 1
+    num_heads: 4
+    mlp_ratio: 4
+    dropout: 0.2
+
+  histogene:
+    n_layers: 4
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.2
+    use_grad_checkpoint: true
+    cnn_chunk_size: 128
+
+training:
+  seed: 2021
+  max_epochs: 200
+  early_stopping_patience: 20
+  early_stopping_metric: pcc_m
+  optimizer: adam
+  lr: 0.0001
+  scheduler: step_lr
+  step_size: 50
+  gamma: 0.9
+  batch_size: 256
+  mixed_precision: true
+  alpha: 0.5
+  num_workers: 0
+  pin_memory: false
+  histogene_max_spots: 256
+  histogene_val_max_spots: 712
+  use_normalized_mse: false
+  # Phase 2 fair-protocol cross-target hook (build_stnet_loaders reads these):
+  # train sees the smoothed targets; val computes PCC against the canonical
+  # SVG counts so the metric is comparable to Phase 1 baselines.
+  train_counts_subdir: counts_svg_spcs
+  val_counts_subdir: counts_svg
+
+mcspr:
+  enabled: false
+  n_modules: 10
+  n_contexts: 6
+  k_min: 30.0
+  tau: 1.0e-6
+  beta: 0.9
+  lambda_max: 0.10
+  warmup_epochs: 0
+  ramp_epochs: 0
+  attachment_point: fusion

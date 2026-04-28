@@ -83,7 +83,7 @@ def main():
         precompute_all(data_dir, dataset, config)
 
     # Build folds
-    folds = build_lopcv_folds(sample_names, dataset)
+    folds = build_lopcv_folds(sample_names, dataset, n_folds=config.get("n_folds"))
     n_folds = len(folds)
     print(f"\n{n_folds} LOPCV folds:")
     for i, (train, test) in enumerate(folds):

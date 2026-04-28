@@ -28,6 +28,8 @@ Cross-slide EMA mechanics (confirmed gate 2 result):
   - By batch ~200, all EMA buffers are well-conditioned (std ~ 0.97)
 """
 
+import sys
+import time
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
@@ -176,12 +178,14 @@ def train_one_fold(
         epoch_mcspr = 0.0
         epoch_n_ctx = 0.0
         n_batches = 0
+        epoch_start = time.time()
+        last_print = epoch_start
 
         lambda_scale = (
             lambda_scheduler.get_scale(epoch) if lambda_scheduler else 0.0
         )
 
-        for batch in train_loader:
+        for batch_i, batch in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
             with autocast():
@@ -207,12 +211,25 @@ def train_one_fold(
             epoch_n_ctx += diag.get("n_active_contexts", 0)
             n_batches += 1
 
+            # First 3 epochs: emit heartbeat every 20s so slowdowns are visible.
+            if epoch < 3:
+                now = time.time()
+                if now - last_print >= 20.0 or batch_i == 0:
+                    print(
+                        f"    E{epoch:03d} batch {batch_i:4d} "
+                        f"elapsed={now - epoch_start:6.1f}s "
+                        f"mse={mse_loss.item():.4f}",
+                        flush=True,
+                    )
+                    last_print = now
+
             if dry_run:
                 _dry_run_report(
                     model, model_type, mcspr_loss_fn, diag, device
                 )
                 return {}
 
+        epoch_wall = time.time() - epoch_start
         lr_scheduler.step()
 
         # Validation
@@ -260,7 +277,9 @@ def train_one_fold(
                 f"mcspr={log_entry['train_mcspr']:.4f} "
                 f"active_ctx={log_entry['mean_active_ctx']:.1f} "
                 f"val_pcc={val_pcc:.4f} | "
-                f"patience={patience_counter}/{patience}"
+                f"patience={patience_counter}/{patience} "
+                f"wall={epoch_wall:.1f}s",
+                flush=True,
             )
 
         if patience_counter >= patience:
@@ -325,7 +344,8 @@ def _patch_based_step(
         for k, v in batch.items()
     }
     Y_true = batch["expression"]
-    ctx_w = batch["context_weights"]
+    # context_weights is optional — only required when MCSPR loss is active.
+    ctx_w = batch.get("context_weights")
 
     if hasattr(model, "forward_patch_based"):
         preds = model.forward_patch_based(batch, device)

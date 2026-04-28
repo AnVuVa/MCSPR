@@ -19,7 +19,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.loaders import build_loaders, build_lopcv_folds
+from src.data.loaders import build_stnet_loaders, build_lopcv_folds
 from src.models.stnet import STNet
 from src.training.universal_trainer import train_one_fold, _evaluate
 
@@ -81,7 +81,7 @@ def main():
     sample_names = sorted([p.stem for p in bc_dir.glob("*.csv")])
     print(f"Dataset: {dataset}, {len(sample_names)} samples")
 
-    folds = build_lopcv_folds(sample_names, dataset)
+    folds = build_lopcv_folds(sample_names, dataset, n_folds=config.get("n_folds"))
     n_folds = len(folds)
     print(f"{n_folds} LOPCV folds")
 
@@ -96,9 +96,19 @@ def main():
         print(f"FOLD {fold_idx}/{n_folds - 1} -- ST-Net baseline")
         print(f"{'=' * 50}")
 
+        # Resume: if a completed fold has metrics.json, skip retraining.
+        metrics_path = output_dir / f"fold_{fold_idx}" / "metrics.json"
+        if metrics_path.exists() and not args.dry_run:
+            with open(metrics_path) as f:
+                val_metrics = json.load(f)
+            all_fold_metrics.append(val_metrics)
+            print(f"Fold {fold_idx}: metrics.json exists — skipping. "
+                  f"PCC(M)={val_metrics.get('pcc_m', 0):.4f}")
+            continue
+
         set_seed(seed)  # reset per fold for reproducibility
 
-        train_loader, val_loader = build_loaders(
+        train_loader, val_loader = build_stnet_loaders(
             data_dir, dataset, fold_idx, config, sample_names
         )
 

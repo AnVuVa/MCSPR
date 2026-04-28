@@ -31,7 +31,7 @@ from src.training.universal_trainer import train_one_fold, _evaluate
 
 OOM_RETRIES = 5
 OOM_DECREMENT = 64
-OOM_FLOOR = 128
+OOM_FLOOR = 64
 
 
 def set_seed(seed: int = 2021):
@@ -77,9 +77,19 @@ def _build_histogene(config):
 def _train_with_oom_guard(
     build_loaders_fn, build_model_fn, train_kwargs_fn, initial_max_spots: int,
 ):
-    """Retry training with decreasing max_spots on OOM."""
+    """Retry training with decreasing max_spots on OOM.
+
+    Between attempts we explicitly `del` the previous model/loaders and
+    force a gc + empty_cache — otherwise Python keeps references alive in
+    the except-block scope and CUDA's allocator retains the fragmented
+    free blocks, which can cause the NEXT smaller-max_spots attempt to
+    still OOM even though the model shrank.
+    """
+    import gc
+
     max_spots = initial_max_spots
     last_err = None
+    train_loader = val_loader = model = None
     for attempt in range(OOM_RETRIES):
         try:
             train_loader, val_loader = build_loaders_fn(max_spots)
@@ -95,10 +105,15 @@ def _train_with_oom_guard(
             last_err = e
             if "out of memory" not in msg.lower():
                 raise
+            del train_loader, val_loader, model
+            train_loader = val_loader = model = None
+            gc.collect()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             new_spots = max(OOM_FLOOR, max_spots - OOM_DECREMENT)
             print(f"  OOM at max_spots={max_spots}; retry "
-                  f"{attempt + 1}/{OOM_RETRIES} with max_spots={new_spots}")
+                  f"{attempt + 1}/{OOM_RETRIES} with max_spots={new_spots}",
+                  flush=True)
             if new_spots == max_spots:
                 break
             max_spots = new_spots
@@ -143,7 +158,7 @@ def main():
         return
     print(f"Dataset: {dataset}, {len(sample_names)} samples")
 
-    folds = build_lopcv_folds(sample_names, dataset)
+    folds = build_lopcv_folds(sample_names, dataset, n_folds=config.get("n_folds"))
     n_folds = len(folds)
     print(f"{n_folds} LOPCV folds")
 
@@ -161,6 +176,17 @@ def main():
         print(f"\n{'=' * 50}")
         print(f"FOLD {fold_idx}/{n_folds - 1} -- HisToGene baseline")
         print(f"{'=' * 50}")
+
+        # Resume: if a completed fold has metrics.json, skip retraining.
+        metrics_path = output_dir / f"fold_{fold_idx}" / "metrics.json"
+        if metrics_path.exists() and not args.dry_run:
+            with open(metrics_path) as f:
+                val_metrics = json.load(f)
+            all_fold_metrics.append(val_metrics)
+            print(f"Fold {fold_idx}: metrics.json exists — skipping. "
+                  f"PCC(M)={val_metrics.get('pcc_m', 0):.4f}")
+            continue
+
         set_seed(seed)
 
         def _build_loaders(max_spots):
