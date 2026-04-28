@@ -5,3 +5,4 @@ results/
 *.docx
 her2st/
 data/
+!src/data/
